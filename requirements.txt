@@ -1,0 +1,7 @@
+PySide6-Essentials>=6.7
+Pillow>=10.4
+numpy>=1.26
+opencv-python>=4.10
+rembg>=2.0
+onnxruntime>=1.18
+pyinstaller>=6.9
