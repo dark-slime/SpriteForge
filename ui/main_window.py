@@ -4,13 +4,14 @@ from pathlib import Path
 
 from PIL import Image
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -20,6 +21,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QProgressDialog,
+    QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QSplitter,
     QStyle,
@@ -37,6 +40,7 @@ from core.background_remove import (
 )
 from core.batch_processor import process_batch
 from core.image_loader import is_supported_image, load_image, normalize_image_paths
+from core.slice_editor import clamp_slice, move_slice, renumber_slices, resize_slice
 from core.sprite_slicer import (
     SliceOptions,
     SpriteSlice,
@@ -60,6 +64,8 @@ class MainWindow(QMainWindow):
         self.current_path: Path | None = None
         self.current_image: Image.Image | None = None
         self.current_slices: list[SpriteSlice] = []
+        self.selected_slice_index: int | None = None
+        self._updating_slice_editor = False
         self.background_remover = BackgroundRemover()
 
         self._create_actions()
@@ -96,6 +102,11 @@ class MainWindow(QMainWindow):
         self.remove_background_action = QAction("去背景", self)
         self.remove_background_action.triggered.connect(self._remove_background)
 
+        self.delete_slice_action = QAction("删除选区", self)
+        self.delete_slice_action.setShortcut(QKeySequence.StandardKey.Delete)
+        self.delete_slice_action.setEnabled(False)
+        self.delete_slice_action.triggered.connect(self._delete_selected_slice)
+
         self.slice_action = QAction("自动切图", self)
         self.slice_action.triggered.connect(self._slice_current_image)
 
@@ -124,6 +135,7 @@ class MainWindow(QMainWindow):
         process_menu = self.menuBar().addMenu("处理")
         process_menu.addAction(self.remove_background_action)
         process_menu.addAction(self.slice_action)
+        process_menu.addAction(self.delete_slice_action)
         process_menu.addAction(self.batch_action)
 
     def _create_toolbar(self) -> None:
@@ -134,6 +146,7 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction(self.remove_background_action)
         toolbar.addAction(self.slice_action)
+        toolbar.addAction(self.delete_slice_action)
         toolbar.addSeparator()
         toolbar.addAction(self.export_action)
         toolbar.addAction(self.batch_action)
@@ -141,7 +154,12 @@ class MainWindow(QMainWindow):
 
     def _create_widgets(self) -> None:
         self.file_list = QListWidget()
-        self.file_list.setMinimumWidth(260)
+        self.file_list.setMinimumWidth(220)
+        self.file_list.setMinimumHeight(110)
+        self.file_list.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Expanding,
+        )
         self.file_list.currentItemChanged.connect(self._on_file_selected)
 
         self.alpha_spin = QSpinBox()
@@ -184,6 +202,23 @@ class MainWindow(QMainWindow):
         self.bg_spill_spin.setRange(0, 100)
         self.bg_spill_spin.setValue(60)
 
+        self.slice_x_spin = QSpinBox()
+        self.slice_y_spin = QSpinBox()
+        self.slice_w_spin = QSpinBox()
+        self.slice_h_spin = QSpinBox()
+        for spin in (
+            self.slice_x_spin,
+            self.slice_y_spin,
+            self.slice_w_spin,
+            self.slice_h_spin,
+        ):
+            spin.setRange(0, 100_000)
+            spin.valueChanged.connect(self._apply_slice_editor_values)
+
+        self.slice_step_spin = QSpinBox()
+        self.slice_step_spin.setRange(1, 512)
+        self.slice_step_spin.setValue(1)
+
         self.merge_check = QCheckBox("合并邻近区域")
         self.batch_remove_check = QCheckBox("批量时去背景")
 
@@ -195,9 +230,9 @@ class MainWindow(QMainWindow):
 
         self.canvas = ImageCanvas()
         self.canvas.slice_selected.connect(self._select_slice)
+        self.canvas.source_point_clicked.connect(self._pick_canvas_color)
 
         self.preview = PreviewWidget()
-        self.preview.setMinimumHeight(170)
         self.preview.slice_selected.connect(self._select_slice)
 
         right_splitter = QSplitter(Qt.Orientation.Vertical)
@@ -205,14 +240,17 @@ class MainWindow(QMainWindow):
         right_splitter.addWidget(self.preview)
         right_splitter.setStretchFactor(0, 4)
         right_splitter.setStretchFactor(1, 1)
+        right_splitter.setChildrenCollapsible(True)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(left_panel)
         splitter.addWidget(right_splitter)
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
+        splitter.setChildrenCollapsible(False)
 
         self.setCentralWidget(splitter)
+        self._sync_slice_editor()
 
     def _build_left_panel(self) -> QWidget:
         panel = QWidget()
@@ -266,6 +304,9 @@ class MainWindow(QMainWindow):
         sample_button = QPushButton("取左上角")
         sample_button.clicked.connect(self._sample_top_left_color)
 
+        pick_button = QPushButton("从画布吸色")
+        pick_button.clicked.connect(self._start_canvas_color_pick)
+
         background_group = QGroupBox("去背景参数")
         background_layout = QFormLayout(background_group)
         background_layout.addRow("模式", self.bg_mode_combo)
@@ -275,6 +316,7 @@ class MainWindow(QMainWindow):
         background_layout.addRow("羽化", self.bg_feather_spin)
         background_layout.addRow("去白边", self.bg_spill_spin)
         background_layout.addRow(sample_button)
+        background_layout.addRow(pick_button)
         background_layout.addRow(self.batch_remove_check)
 
         params_group = QGroupBox("切图参数")
@@ -285,10 +327,68 @@ class MainWindow(QMainWindow):
         params_layout.addRow("导出命名", self.naming_combo)
         params_layout.addRow(self.merge_check)
 
+        self.slice_editor_group = QGroupBox("选区编辑")
+        editor_layout = QFormLayout(self.slice_editor_group)
+
+        position_widget = QWidget()
+        position_layout = QGridLayout(position_widget)
+        position_layout.setContentsMargins(0, 0, 0, 0)
+        position_layout.addWidget(QLabel("X"), 0, 0)
+        position_layout.addWidget(self.slice_x_spin, 0, 1)
+        position_layout.addWidget(QLabel("Y"), 0, 2)
+        position_layout.addWidget(self.slice_y_spin, 0, 3)
+        position_layout.addWidget(QLabel("W"), 1, 0)
+        position_layout.addWidget(self.slice_w_spin, 1, 1)
+        position_layout.addWidget(QLabel("H"), 1, 2)
+        position_layout.addWidget(self.slice_h_spin, 1, 3)
+
+        move_widget = QWidget()
+        move_layout = QGridLayout(move_widget)
+        move_layout.setContentsMargins(0, 0, 0, 0)
+        move_up = QPushButton("上")
+        move_down = QPushButton("下")
+        move_left = QPushButton("左")
+        move_right = QPushButton("右")
+        move_up.clicked.connect(lambda _checked=False: self._nudge_selected(0, -1))
+        move_down.clicked.connect(lambda _checked=False: self._nudge_selected(0, 1))
+        move_left.clicked.connect(lambda _checked=False: self._nudge_selected(-1, 0))
+        move_right.clicked.connect(lambda _checked=False: self._nudge_selected(1, 0))
+        move_layout.addWidget(move_up, 0, 1)
+        move_layout.addWidget(move_left, 1, 0)
+        move_layout.addWidget(move_right, 1, 2)
+        move_layout.addWidget(move_down, 2, 1)
+
+        resize_widget = QWidget()
+        resize_layout = QGridLayout(resize_widget)
+        resize_layout.setContentsMargins(0, 0, 0, 0)
+        width_down = QPushButton("宽-")
+        width_up = QPushButton("宽+")
+        height_down = QPushButton("高-")
+        height_up = QPushButton("高+")
+        width_down.clicked.connect(lambda _checked=False: self._resize_selected(-1, 0))
+        width_up.clicked.connect(lambda _checked=False: self._resize_selected(1, 0))
+        height_down.clicked.connect(lambda _checked=False: self._resize_selected(0, -1))
+        height_up.clicked.connect(lambda _checked=False: self._resize_selected(0, 1))
+        resize_layout.addWidget(width_down, 0, 0)
+        resize_layout.addWidget(width_up, 0, 1)
+        resize_layout.addWidget(height_down, 1, 0)
+        resize_layout.addWidget(height_up, 1, 1)
+
+        delete_button = QPushButton("删除当前选区")
+        delete_button.clicked.connect(self._delete_selected_slice)
+
+        editor_layout.addRow("边界", position_widget)
+        editor_layout.addRow("步进", self.slice_step_spin)
+        editor_layout.addRow("移动", move_widget)
+        editor_layout.addRow("缩放", resize_widget)
+        editor_layout.addRow(delete_button)
+        self.slice_editor_group.setEnabled(False)
+
         layout.addWidget(file_group)
         layout.addWidget(process_group)
         layout.addWidget(background_group)
         layout.addWidget(params_group)
+        layout.addWidget(self.slice_editor_group)
         layout.addStretch(1)
 
         count_label = QLabel("0 images")
@@ -296,7 +396,13 @@ class MainWindow(QMainWindow):
         self.count_label = count_label
         layout.addWidget(count_label)
 
-        return panel
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setWidget(panel)
+        scroll_area.setMinimumWidth(300)
+        scroll_area.setMaximumWidth(390)
+        scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
+        return scroll_area
 
     def _select_images(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
@@ -359,9 +465,11 @@ class MainWindow(QMainWindow):
         self.current_path = path
         self.current_image = image
         self.current_slices = []
+        self.selected_slice_index = None
         self.canvas.set_image(image)
         self.canvas.set_slices([])
         self.preview.set_slices(image, [])
+        self._sync_slice_editor()
         self.statusBar().showMessage(f"Loaded {path.name}")
 
     def _remove_background(self) -> None:
@@ -389,9 +497,11 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
 
         self.current_slices = []
+        self.selected_slice_index = None
         self.canvas.set_image(self.current_image)
         self.canvas.set_slices([])
         self.preview.set_slices(self.current_image, [])
+        self._sync_slice_editor()
         self.statusBar().showMessage("去背景完成", 5000)
 
     def _slice_current_image(self) -> None:
@@ -414,6 +524,8 @@ class MainWindow(QMainWindow):
 
         self.canvas.set_slices(self.current_slices)
         self.preview.set_slices(self.current_image, self.current_slices)
+        self.selected_slice_index = 0 if self.current_slices else None
+        self._refresh_slice_views()
         self.statusBar().showMessage(f"Detected {len(self.current_slices)} sprite(s)")
 
     def _export_current(self) -> None:
@@ -531,9 +643,163 @@ class MainWindow(QMainWindow):
             4000,
         )
 
+    def _start_canvas_color_pick(self) -> None:
+        if self.current_image is None:
+            self._show_warning("请先导入图片")
+            return
+
+        self.canvas.set_pick_point_mode(True)
+        self.statusBar().showMessage("请在预览图上点击背景颜色", 6000)
+
+    def _pick_canvas_color(self, x: int, y: int) -> None:
+        if self.current_image is None:
+            return
+
+        red, green, blue, _alpha = self.current_image.convert("RGBA").getpixel((x, y))
+        self.bg_r_spin.setValue(red)
+        self.bg_g_spin.setValue(green)
+        self.bg_b_spin.setValue(blue)
+        manual_index = self.bg_sample_combo.findData("manual")
+        if manual_index >= 0:
+            self.bg_sample_combo.setCurrentIndex(manual_index)
+        self.canvas.set_pick_point_mode(False)
+        self.statusBar().showMessage(
+            f"已从画布取色 RGB({red}, {green}, {blue})",
+            5000,
+        )
+
     def _select_slice(self, index: int) -> None:
+        self.selected_slice_index = index
         self.canvas.set_selected_slice(index)
         self.preview.select_slice(index)
+        self._sync_slice_editor()
+
+    def _selected_slice(self) -> SpriteSlice | None:
+        if self.selected_slice_index is None:
+            return None
+        if not 0 <= self.selected_slice_index < len(self.current_slices):
+            return None
+        return self.current_slices[self.selected_slice_index]
+
+    def _apply_slice_editor_values(self, *_args) -> None:
+        if self._updating_slice_editor or self.current_image is None:
+            return
+        selected = self._selected_slice()
+        if selected is None:
+            return
+
+        edited = SpriteSlice(
+            name=selected.name,
+            x=self.slice_x_spin.value(),
+            y=self.slice_y_spin.value(),
+            width=self.slice_w_spin.value(),
+            height=self.slice_h_spin.value(),
+            area=selected.area,
+        )
+        self._replace_selected_slice(clamp_slice(edited, self.current_image.size))
+
+    def _nudge_selected(self, direction_x: int, direction_y: int) -> None:
+        if self.current_image is None:
+            return
+        selected = self._selected_slice()
+        if selected is None:
+            self._show_warning("请先选择一个切图框")
+            return
+
+        step = self.slice_step_spin.value()
+        self._replace_selected_slice(
+            move_slice(
+                selected,
+                direction_x * step,
+                direction_y * step,
+                self.current_image.size,
+            )
+        )
+
+    def _resize_selected(self, direction_w: int, direction_h: int) -> None:
+        if self.current_image is None:
+            return
+        selected = self._selected_slice()
+        if selected is None:
+            self._show_warning("请先选择一个切图框")
+            return
+
+        step = self.slice_step_spin.value()
+        self._replace_selected_slice(
+            resize_slice(
+                selected,
+                direction_w * step,
+                direction_h * step,
+                self.current_image.size,
+            )
+        )
+
+    def _delete_selected_slice(self) -> None:
+        selected = self._selected_slice()
+        if selected is None:
+            self._show_warning("请先选择一个切图框")
+            return
+
+        deleted_index = self.selected_slice_index
+        del self.current_slices[deleted_index]
+        self.current_slices = renumber_slices(
+            self.current_slices,
+            self._slice_name_prefix(),
+        )
+        if not self.current_slices:
+            self.selected_slice_index = None
+        else:
+            self.selected_slice_index = min(deleted_index, len(self.current_slices) - 1)
+        self._refresh_slice_views()
+        self.statusBar().showMessage(f"已删除 {selected.name}", 4000)
+
+    def _replace_selected_slice(self, sprite_slice: SpriteSlice) -> None:
+        if self.selected_slice_index is None:
+            return
+        self.current_slices[self.selected_slice_index] = sprite_slice
+        self._refresh_slice_views()
+
+    def _refresh_slice_views(self) -> None:
+        self.canvas.set_slices(self.current_slices)
+        self.preview.set_slices(self.current_image, self.current_slices)
+        self.canvas.set_selected_slice(self.selected_slice_index)
+        self.preview.select_slice(self.selected_slice_index)
+        self._sync_slice_editor()
+
+    def _sync_slice_editor(self) -> None:
+        selected = self._selected_slice()
+        self.slice_editor_group.setEnabled(selected is not None)
+        self.delete_slice_action.setEnabled(selected is not None)
+
+        self._updating_slice_editor = True
+        try:
+            if selected is None or self.current_image is None:
+                for spin in (
+                    self.slice_x_spin,
+                    self.slice_y_spin,
+                    self.slice_w_spin,
+                    self.slice_h_spin,
+                ):
+                    spin.setRange(0, 100_000)
+                    spin.setValue(0)
+                return
+
+            image_width, image_height = self.current_image.size
+            self.slice_x_spin.setRange(0, max(0, image_width - 1))
+            self.slice_y_spin.setRange(0, max(0, image_height - 1))
+            self.slice_w_spin.setRange(1, max(1, image_width - selected.x))
+            self.slice_h_spin.setRange(1, max(1, image_height - selected.y))
+            self.slice_x_spin.setValue(selected.x)
+            self.slice_y_spin.setValue(selected.y)
+            self.slice_w_spin.setValue(selected.width)
+            self.slice_h_spin.setValue(selected.height)
+        finally:
+            self._updating_slice_editor = False
+
+    def _slice_name_prefix(self) -> str:
+        if self.naming_combo.currentData() == "filename" and self.current_path:
+            return self.current_path.stem
+        return "sprite"
 
     def _refresh_count(self) -> None:
         self.count_label.setText(f"{len(self.image_paths)} images")

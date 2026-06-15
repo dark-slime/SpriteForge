@@ -3,7 +3,7 @@ from __future__ import annotations
 from PIL import Image, ImageDraw
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QIcon, QPixmap
-from PySide6.QtWidgets import QListView, QListWidget, QListWidgetItem
+from PySide6.QtWidgets import QListView, QListWidget, QListWidgetItem, QSizePolicy
 
 from core.sprite_slicer import SpriteSlice
 from ui.image_view import pil_image_to_qimage
@@ -26,7 +26,8 @@ class PreviewWidget(QListWidget):
         self.setUniformItemSizes(True)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.setMinimumHeight(172)
+        self.setMinimumHeight(130)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setStyleSheet(
             """
             QListWidget {
