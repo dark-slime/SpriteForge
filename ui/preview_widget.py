@@ -15,6 +15,8 @@ class PreviewWidget(QListWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._icon_size = 112
+        self._image: Image.Image | None = None
+        self._slices: list[SpriteSlice] = []
         self.setViewMode(QListWidget.ViewMode.IconMode)
         self.setFlow(QListView.Flow.LeftToRight)
         self.setWrapping(False)
@@ -48,12 +50,41 @@ class PreviewWidget(QListWidget):
         self.itemClicked.connect(self._emit_slice_selected)
 
     def set_slices(self, image: Image.Image | None, slices: list[SpriteSlice]) -> None:
+        self._image = image
+        self._slices = list(slices)
+        self._render_slices()
+
+    def set_thumbnail_size(self, size: int) -> None:
+        self._icon_size = max(48, min(192, int(size)))
+        self._apply_icon_layout()
+        self._render_slices()
+
+    def set_wrapping_enabled(self, enabled: bool) -> None:
+        self.setWrapping(enabled)
+        self.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            if enabled
+            else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+            if enabled
+            else Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._apply_icon_layout()
+
+    def _apply_icon_layout(self) -> None:
+        self.setIconSize(QSize(self._icon_size, self._icon_size))
+        self.setGridSize(QSize(self._icon_size + 30, self._icon_size + 38))
+        self.setMinimumHeight(max(96, min(220, self._icon_size + 28)))
+
+    def _render_slices(self) -> None:
         self.clear()
-        if image is None:
+        if self._image is None:
             return
 
-        rgba_image = image.convert("RGBA")
-        for index, sprite_slice in enumerate(slices):
+        rgba_image = self._image.convert("RGBA")
+        for index, sprite_slice in enumerate(self._slices):
             thumbnail = rgba_image.crop(sprite_slice.crop_box)
             pixmap = self._thumbnail_pixmap(thumbnail)
 

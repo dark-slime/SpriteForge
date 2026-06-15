@@ -6,6 +6,7 @@ from PIL import Image
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -156,6 +157,9 @@ class MainWindow(QMainWindow):
         self.file_list = QListWidget()
         self.file_list.setMinimumWidth(220)
         self.file_list.setMinimumHeight(110)
+        self.file_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
         self.file_list.setSizePolicy(
             QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Expanding,
@@ -226,14 +230,28 @@ class MainWindow(QMainWindow):
         self.naming_combo.addItem("sprite_001", "sprite")
         self.naming_combo.addItem("文件名_001", "filename")
 
+        self.canvas_zoom_label = QLabel("100%")
+
+        self.preview_size_spin = QSpinBox()
+        self.preview_size_spin.setRange(48, 192)
+        self.preview_size_spin.setValue(112)
+        self.preview_size_spin.setSingleStep(8)
+
+        self.preview_layout_combo = QComboBox()
+        self.preview_layout_combo.addItem("横向滚动", "horizontal")
+        self.preview_layout_combo.addItem("自动换行", "wrap")
+
         left_panel = self._build_left_panel()
 
         self.canvas = ImageCanvas()
         self.canvas.slice_selected.connect(self._select_slice)
         self.canvas.source_point_clicked.connect(self._pick_canvas_color)
+        self.canvas.zoom_changed.connect(self._update_canvas_zoom_label)
 
         self.preview = PreviewWidget()
         self.preview.slice_selected.connect(self._select_slice)
+        self.preview_size_spin.valueChanged.connect(self.preview.set_thumbnail_size)
+        self.preview_layout_combo.currentIndexChanged.connect(self._apply_preview_layout)
 
         right_splitter = QSplitter(Qt.Orientation.Vertical)
         right_splitter.addWidget(self.canvas)
@@ -250,6 +268,7 @@ class MainWindow(QMainWindow):
         splitter.setChildrenCollapsible(False)
 
         self.setCentralWidget(splitter)
+        self._apply_preview_layout()
         self._sync_slice_editor()
 
     def _build_left_panel(self) -> QWidget:
@@ -264,6 +283,18 @@ class MainWindow(QMainWindow):
         folder_button = QPushButton("导入文件夹")
         folder_button.setIcon(self.import_folder_action.icon())
         folder_button.clicked.connect(self._select_folder)
+
+        remove_file_button = QPushButton("移除选中")
+        remove_file_button.clicked.connect(self._remove_selected_images)
+
+        clear_files_button = QPushButton("清空列表")
+        clear_files_button.clicked.connect(self._clear_image_list)
+
+        file_action_widget = QWidget()
+        file_action_layout = QHBoxLayout(file_action_widget)
+        file_action_layout.setContentsMargins(0, 0, 0, 0)
+        file_action_layout.addWidget(remove_file_button)
+        file_action_layout.addWidget(clear_files_button)
 
         remove_button = QPushButton("去背景")
         remove_button.clicked.connect(self._remove_background)
@@ -282,6 +313,7 @@ class MainWindow(QMainWindow):
         file_layout = QVBoxLayout(file_group)
         file_layout.addWidget(import_button)
         file_layout.addWidget(folder_button)
+        file_layout.addWidget(file_action_widget)
         file_layout.addWidget(self.file_list)
 
         process_group = QGroupBox("操作")
@@ -326,6 +358,24 @@ class MainWindow(QMainWindow):
         params_layout.addRow("Padding", self.padding_spin)
         params_layout.addRow("导出命名", self.naming_combo)
         params_layout.addRow(self.merge_check)
+
+        canvas_zoom_group = QGroupBox("画布缩放")
+        canvas_zoom_layout = QGridLayout(canvas_zoom_group)
+        zoom_out_button = QPushButton("-")
+        zoom_in_button = QPushButton("+")
+        zoom_fit_button = QPushButton("适应")
+        zoom_out_button.clicked.connect(self._zoom_canvas_out)
+        zoom_in_button.clicked.connect(self._zoom_canvas_in)
+        zoom_fit_button.clicked.connect(self._fit_canvas)
+        canvas_zoom_layout.addWidget(zoom_out_button, 0, 0)
+        canvas_zoom_layout.addWidget(self.canvas_zoom_label, 0, 1)
+        canvas_zoom_layout.addWidget(zoom_in_button, 0, 2)
+        canvas_zoom_layout.addWidget(zoom_fit_button, 1, 0, 1, 3)
+
+        preview_group = QGroupBox("结果预览")
+        preview_layout = QFormLayout(preview_group)
+        preview_layout.addRow("缩略图大小", self.preview_size_spin)
+        preview_layout.addRow("布局", self.preview_layout_combo)
 
         self.slice_editor_group = QGroupBox("选区编辑")
         editor_layout = QFormLayout(self.slice_editor_group)
@@ -388,6 +438,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(process_group)
         layout.addWidget(background_group)
         layout.addWidget(params_group)
+        layout.addWidget(canvas_zoom_group)
+        layout.addWidget(preview_group)
         layout.addWidget(self.slice_editor_group)
         layout.addStretch(1)
 
@@ -418,6 +470,62 @@ class MainWindow(QMainWindow):
         if folder:
             self._add_image_paths([Path(folder)])
 
+    def _remove_selected_images(self) -> None:
+        selected_rows = sorted(
+            {index.row() for index in self.file_list.selectedIndexes()},
+            reverse=True,
+        )
+        if not selected_rows:
+            self._show_warning("请先在图片列表中选择要移除的文件")
+            return
+
+        removed_paths: set[Path] = set()
+        first_removed = min(selected_rows)
+        self.file_list.blockSignals(True)
+        try:
+            for row in selected_rows:
+                item = self.file_list.takeItem(row)
+                if item is not None:
+                    path_value = item.data(Qt.ItemDataRole.UserRole)
+                    if path_value:
+                        removed_paths.add(Path(path_value).resolve())
+                if 0 <= row < len(self.image_paths):
+                    del self.image_paths[row]
+        finally:
+            self.file_list.blockSignals(False)
+
+        self._refresh_count()
+        current_removed = (
+            self.current_path is not None
+            and self.current_path.resolve() in removed_paths
+        )
+        if current_removed:
+            if self.file_list.count() == 0:
+                self._clear_current_image()
+            else:
+                self.file_list.setCurrentRow(min(first_removed, self.file_list.count() - 1))
+        self.statusBar().showMessage(f"已移除 {len(selected_rows)} 个文件", 4000)
+
+    def _clear_image_list(self) -> None:
+        if not self.image_paths:
+            return
+
+        self.file_list.clear()
+        self.image_paths = []
+        self._clear_current_image()
+        self._refresh_count()
+        self.statusBar().showMessage("已清空图片列表", 4000)
+
+    def _clear_current_image(self) -> None:
+        self.current_path = None
+        self.current_image = None
+        self.current_slices = []
+        self.selected_slice_index = None
+        self.canvas.set_image(None)
+        self.canvas.set_slices([])
+        self.preview.set_slices(None, [])
+        self._sync_slice_editor()
+
     def _add_image_paths(self, raw_paths: list[Path]) -> None:
         new_paths = normalize_image_paths(raw_paths)
         if not new_paths:
@@ -443,6 +551,25 @@ class MainWindow(QMainWindow):
         if first_new_row is not None and self.current_image is None:
             self.file_list.setCurrentRow(first_new_row)
         self.statusBar().showMessage(f"Imported {len(new_paths)} image(s)", 4000)
+
+    def _zoom_canvas_in(self) -> None:
+        self.canvas.zoom_in()
+
+    def _zoom_canvas_out(self) -> None:
+        self.canvas.zoom_out()
+
+    def _fit_canvas(self) -> None:
+        self.canvas.fit_to_view()
+
+    def _update_canvas_zoom_label(self, percent: int) -> None:
+        self.canvas_zoom_label.setText(f"{percent}%")
+
+    def _apply_preview_layout(self, *_args) -> None:
+        if not hasattr(self, "preview"):
+            return
+        self.preview.set_wrapping_enabled(
+            self.preview_layout_combo.currentData() == "wrap"
+        )
 
     def _on_file_selected(
         self,
