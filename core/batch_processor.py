@@ -3,7 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from core.background_remove import BackgroundRemover
+from core.background_remove import (
+    BackgroundRemover,
+    SolidColorRemoveOptions,
+    remove_solid_background,
+)
 from core.image_loader import load_image, normalize_image_paths
 from core.sprite_slicer import SliceOptions, SpriteSlice, slice_image
 from export.json_exporter import export_slices_json
@@ -23,10 +27,13 @@ def process_batch(
     output_root: str | Path,
     options: SliceOptions,
     remove_background: bool = False,
+    background_mode: str = "solid",
+    solid_options: SolidColorRemoveOptions | None = None,
 ) -> list[BatchItemResult]:
     output_root_path = Path(output_root)
     image_paths = normalize_image_paths(sources)
-    remover = BackgroundRemover() if remove_background else None
+    remover = BackgroundRemover() if remove_background and background_mode == "ai" else None
+    solid_options = solid_options or SolidColorRemoveOptions()
     results: list[BatchItemResult] = []
 
     for image_path in image_paths:
@@ -35,6 +42,8 @@ def process_batch(
             image = load_image(image_path)
             if remover is not None:
                 image = remover.remove(image)
+            elif remove_background:
+                image = remove_solid_background(image, solid_options)
 
             slices = slice_image(image, options=options, base_name=image_path.stem)
             export_processed_image(image, item_output, image_path.stem)

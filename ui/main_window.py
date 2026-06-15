@@ -28,7 +28,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.background_remove import BackgroundRemoveUnavailable, BackgroundRemover
+from core.background_remove import (
+    BackgroundRemoveUnavailable,
+    BackgroundRemover,
+    SolidColorRemoveOptions,
+    remove_solid_background,
+    sample_background_color,
+)
 from core.batch_processor import process_batch
 from core.image_loader import is_supported_image, load_image, normalize_image_paths
 from core.sprite_slicer import (
@@ -150,6 +156,34 @@ class MainWindow(QMainWindow):
         self.padding_spin.setRange(0, 512)
         self.padding_spin.setValue(4)
 
+        self.bg_mode_combo = QComboBox()
+        self.bg_mode_combo.addItem("纯色快速", "solid")
+        self.bg_mode_combo.addItem("AI rembg", "ai")
+
+        self.bg_sample_combo = QComboBox()
+        self.bg_sample_combo.addItem("四角自动", "corners")
+        self.bg_sample_combo.addItem("左上角", "top_left")
+        self.bg_sample_combo.addItem("手动 RGB", "manual")
+
+        self.bg_r_spin = QSpinBox()
+        self.bg_g_spin = QSpinBox()
+        self.bg_b_spin = QSpinBox()
+        for spin in (self.bg_r_spin, self.bg_g_spin, self.bg_b_spin):
+            spin.setRange(0, 255)
+            spin.setValue(255)
+
+        self.bg_tolerance_spin = QSpinBox()
+        self.bg_tolerance_spin.setRange(0, 255)
+        self.bg_tolerance_spin.setValue(28)
+
+        self.bg_feather_spin = QSpinBox()
+        self.bg_feather_spin.setRange(0, 255)
+        self.bg_feather_spin.setValue(10)
+
+        self.bg_spill_spin = QSpinBox()
+        self.bg_spill_spin.setRange(0, 100)
+        self.bg_spill_spin.setValue(60)
+
         self.merge_check = QCheckBox("合并邻近区域")
         self.batch_remove_check = QCheckBox("批量时去背景")
 
@@ -219,17 +253,41 @@ class MainWindow(QMainWindow):
         process_layout.addWidget(export_button)
         process_layout.addWidget(batch_button)
 
-        params_group = QGroupBox("参数")
+        color_widget = QWidget()
+        color_layout = QHBoxLayout(color_widget)
+        color_layout.setContentsMargins(0, 0, 0, 0)
+        color_layout.addWidget(QLabel("R"))
+        color_layout.addWidget(self.bg_r_spin)
+        color_layout.addWidget(QLabel("G"))
+        color_layout.addWidget(self.bg_g_spin)
+        color_layout.addWidget(QLabel("B"))
+        color_layout.addWidget(self.bg_b_spin)
+
+        sample_button = QPushButton("取左上角")
+        sample_button.clicked.connect(self._sample_top_left_color)
+
+        background_group = QGroupBox("去背景参数")
+        background_layout = QFormLayout(background_group)
+        background_layout.addRow("模式", self.bg_mode_combo)
+        background_layout.addRow("背景采样", self.bg_sample_combo)
+        background_layout.addRow("手动颜色", color_widget)
+        background_layout.addRow("容差", self.bg_tolerance_spin)
+        background_layout.addRow("羽化", self.bg_feather_spin)
+        background_layout.addRow("去白边", self.bg_spill_spin)
+        background_layout.addRow(sample_button)
+        background_layout.addRow(self.batch_remove_check)
+
+        params_group = QGroupBox("切图参数")
         params_layout = QFormLayout(params_group)
         params_layout.addRow("Alpha 阈值", self.alpha_spin)
         params_layout.addRow("最小面积", self.min_area_spin)
         params_layout.addRow("Padding", self.padding_spin)
         params_layout.addRow("导出命名", self.naming_combo)
         params_layout.addRow(self.merge_check)
-        params_layout.addRow(self.batch_remove_check)
 
         layout.addWidget(file_group)
         layout.addWidget(process_group)
+        layout.addWidget(background_group)
         layout.addWidget(params_group)
         layout.addStretch(1)
 
@@ -312,11 +370,17 @@ class MainWindow(QMainWindow):
             return
 
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        self.statusBar().showMessage("Removing background...")
+        self.statusBar().showMessage("正在去背景...")
         try:
-            self.current_image = self.background_remover.remove(self.current_image)
+            if self.bg_mode_combo.currentData() == "ai":
+                self.current_image = self.background_remover.remove(self.current_image)
+            else:
+                self.current_image = remove_solid_background(
+                    self.current_image,
+                    self._solid_background_options(),
+                )
         except BackgroundRemoveUnavailable as exc:
-            self._show_error("rembg 不可用", str(exc))
+            self._show_error("去背景不可用", str(exc))
             return
         except Exception as exc:
             self._show_error("去背景失败", str(exc))
@@ -328,7 +392,7 @@ class MainWindow(QMainWindow):
         self.canvas.set_image(self.current_image)
         self.canvas.set_slices([])
         self.preview.set_slices(self.current_image, [])
-        self.statusBar().showMessage("Background removed", 5000)
+        self.statusBar().showMessage("去背景完成", 5000)
 
     def _slice_current_image(self) -> None:
         if self.current_image is None:
@@ -406,6 +470,8 @@ class MainWindow(QMainWindow):
                 output_dir,
                 self._slice_options(),
                 remove_background=self.batch_remove_check.isChecked(),
+                background_mode=self.bg_mode_combo.currentData(),
+                solid_options=self._solid_background_options(),
             )
         finally:
             progress.close()
@@ -433,6 +499,36 @@ class MainWindow(QMainWindow):
             padding=self.padding_spin.value(),
             merge_nearby=self.merge_check.isChecked(),
             naming_mode=self.naming_combo.currentData(),
+        )
+
+    def _solid_background_options(self) -> SolidColorRemoveOptions:
+        return SolidColorRemoveOptions(
+            background_color=(
+                self.bg_r_spin.value(),
+                self.bg_g_spin.value(),
+                self.bg_b_spin.value(),
+            ),
+            sample_mode=self.bg_sample_combo.currentData(),
+            tolerance=self.bg_tolerance_spin.value(),
+            feather=self.bg_feather_spin.value(),
+            spill_cleanup=self.bg_spill_spin.value(),
+        )
+
+    def _sample_top_left_color(self) -> None:
+        if self.current_image is None:
+            self._show_warning("请先导入图片")
+            return
+
+        red, green, blue = sample_background_color(self.current_image, "top_left")
+        self.bg_r_spin.setValue(red)
+        self.bg_g_spin.setValue(green)
+        self.bg_b_spin.setValue(blue)
+        manual_index = self.bg_sample_combo.findData("manual")
+        if manual_index >= 0:
+            self.bg_sample_combo.setCurrentIndex(manual_index)
+        self.statusBar().showMessage(
+            f"已取色 RGB({red}, {green}, {blue})",
+            4000,
         )
 
     def _select_slice(self, index: int) -> None:
