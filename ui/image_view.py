@@ -24,6 +24,7 @@ def pil_image_to_qimage(image: Image.Image) -> QImage:
 class ImageCanvas(QWidget):
     slice_selected = Signal(int)
     source_point_clicked = Signal(int, int)
+    slice_geometry_changed = Signal(int, int, int, int, int)
     zoom_changed = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -40,6 +41,11 @@ class ImageCanvas(QWidget):
         self._pan = QPointF(0.0, 0.0)
         self._is_panning = False
         self._last_pan_position = QPointF()
+        self._drag_mode: str | None = None
+        self._drag_handle: str | None = None
+        self._drag_index: int | None = None
+        self._drag_start_source = QPointF()
+        self._drag_start_slice: SpriteSlice | None = None
 
     def set_image(self, image: Image.Image | None) -> None:
         if image is None:
@@ -140,6 +146,27 @@ class ImageCanvas(QWidget):
             self.source_point_clicked.emit(source_x, source_y)
             return
 
+        if event.button() == Qt.MouseButton.LeftButton:
+            handle_hit = self._hit_handle(event.position())
+            if handle_hit is not None:
+                index, handle = handle_hit
+                self._selected_index = index
+                self.slice_selected.emit(index)
+                self._start_slice_drag(index, "resize", QPointF(source_x, source_y), handle)
+                event.accept()
+                return
+
+            if self._selected_index is not None:
+                selected = self._slices[self._selected_index]
+                if _slice_contains(selected, source_x, source_y):
+                    self._start_slice_drag(
+                        self._selected_index,
+                        "move",
+                        QPointF(source_x, source_y),
+                    )
+                    event.accept()
+                    return
+
         candidates: list[tuple[int, int]] = []
         for index, sprite_slice in enumerate(self._slices):
             if (
@@ -155,6 +182,13 @@ class ImageCanvas(QWidget):
             self.update()
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._drag_mode is not None:
+            source_point = self._event_source_point(event)
+            if source_point is not None:
+                self._update_slice_drag(QPointF(source_point[0], source_point[1]))
+            event.accept()
+            return
+
         if self._is_panning:
             delta = event.position() - self._last_pan_position
             self._pan += delta
@@ -163,6 +197,19 @@ class ImageCanvas(QWidget):
             event.accept()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._drag_mode is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._drag_mode = None
+            self._drag_handle = None
+            self._drag_index = None
+            self._drag_start_slice = None
+            self.setCursor(
+                Qt.CursorShape.CrossCursor
+                if self._pick_point_mode
+                else Qt.CursorShape.ArrowCursor
+            )
+            event.accept()
+            return
+
         if self._is_panning and event.button() in (
             Qt.MouseButton.MiddleButton,
             Qt.MouseButton.RightButton,
@@ -203,6 +250,122 @@ class ImageCanvas(QWidget):
             return None
 
         return (int(source_point.x()), int(source_point.y()))
+
+    def _start_slice_drag(
+        self,
+        index: int,
+        mode: str,
+        source_point: QPointF,
+        handle: str | None = None,
+    ) -> None:
+        self._drag_index = index
+        self._drag_mode = mode
+        self._drag_handle = handle
+        self._drag_start_source = source_point
+        self._drag_start_slice = self._slices[index]
+        self.setCursor(
+            Qt.CursorShape.SizeAllCursor
+            if mode == "move"
+            else self._cursor_for_handle(handle)
+        )
+
+    def _update_slice_drag(self, source_point: QPointF) -> None:
+        if (
+            self._drag_index is None
+            or self._drag_start_slice is None
+            or self._source_size is None
+        ):
+            return
+
+        delta_x = int(round(source_point.x() - self._drag_start_source.x()))
+        delta_y = int(round(source_point.y() - self._drag_start_source.y()))
+        original = self._drag_start_slice
+
+        if self._drag_mode == "move":
+            x = original.x + delta_x
+            y = original.y + delta_y
+            width = original.width
+            height = original.height
+        else:
+            left = original.x
+            top = original.y
+            right = original.x + original.width
+            bottom = original.y + original.height
+            handle = self._drag_handle or "br"
+            if "l" in handle:
+                left += delta_x
+            if "r" in handle:
+                right += delta_x
+            if "t" in handle:
+                top += delta_y
+            if "b" in handle:
+                bottom += delta_y
+
+            if right < left:
+                left, right = right, left
+            if bottom < top:
+                top, bottom = bottom, top
+            x = left
+            y = top
+            width = max(1, right - left)
+            height = max(1, bottom - top)
+
+        self.slice_geometry_changed.emit(self._drag_index, x, y, width, height)
+
+    def _hit_handle(self, point: QPointF) -> tuple[int, str] | None:
+        if self._source_size is None:
+            return None
+
+        image_rect = self._image_rect()
+        if image_rect.width() <= 0 or image_rect.height() <= 0:
+            return None
+
+        for index, sprite_slice in reversed(list(enumerate(self._slices))):
+            handles = self._slice_handle_rects(sprite_slice, image_rect)
+            for handle_name, handle_rect in handles.items():
+                if handle_rect.contains(point):
+                    return index, handle_name
+        return None
+
+    def _slice_handle_rects(
+        self,
+        sprite_slice: SpriteSlice,
+        image_rect: QRect,
+    ) -> dict[str, QRectF]:
+        if self._source_size is None:
+            return {}
+
+        source_width, source_height = self._source_size
+        scale_x = image_rect.width() / source_width
+        scale_y = image_rect.height() / source_height
+        rect = QRectF(
+            image_rect.left() + sprite_slice.x * scale_x,
+            image_rect.top() + sprite_slice.y * scale_y,
+            sprite_slice.width * scale_x,
+            sprite_slice.height * scale_y,
+        )
+        handle_size = 12
+        return {
+            "tl": _centered_rect(rect.topLeft(), handle_size),
+            "tr": _centered_rect(rect.topRight(), handle_size),
+            "bl": _centered_rect(rect.bottomLeft(), handle_size),
+            "br": _centered_rect(rect.bottomRight(), handle_size),
+            "t": _edge_rect(rect, "t", handle_size),
+            "b": _edge_rect(rect, "b", handle_size),
+            "l": _edge_rect(rect, "l", handle_size),
+            "r": _edge_rect(rect, "r", handle_size),
+        }
+
+    def _cursor_for_handle(self, handle: str | None) -> Qt.CursorShape:
+        if handle in ("tl", "br"):
+            return Qt.CursorShape.SizeFDiagCursor
+        if handle in ("tr", "bl"):
+            return Qt.CursorShape.SizeBDiagCursor
+        if handle in ("l", "r"):
+            return Qt.CursorShape.SizeHorCursor
+        if handle in ("t", "b"):
+            return Qt.CursorShape.SizeVerCursor
+        return Qt.CursorShape.ArrowCursor
 
     def _view_to_source(self, point: QPointF) -> QPointF | None:
         if self._source_size is None:
@@ -294,6 +457,7 @@ class ImageCanvas(QWidget):
             )
             selected = index == self._selected_index
             color = QColor("#58d68d") if selected else QColor("#45b7ff")
+            painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(color, 2 if selected else 1.5))
             painter.drawRect(rect)
             if selected:
@@ -324,3 +488,45 @@ class ImageCanvas(QWidget):
                     handle_size,
                 )
             )
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+
+
+def _slice_contains(sprite_slice: SpriteSlice, x: int, y: int) -> bool:
+    return (
+        sprite_slice.x <= x <= sprite_slice.x + sprite_slice.width
+        and sprite_slice.y <= y <= sprite_slice.y + sprite_slice.height
+    )
+
+
+def _centered_rect(point: QPointF, size: int) -> QRectF:
+    return QRectF(point.x() - size / 2, point.y() - size / 2, size, size)
+
+
+def _edge_rect(rect: QRectF, edge: str, size: int) -> QRectF:
+    if edge == "t":
+        return QRectF(
+            rect.left() + size,
+            rect.top() - size / 2,
+            max(1, rect.width() - size * 2),
+            size,
+        )
+    if edge == "b":
+        return QRectF(
+            rect.left() + size,
+            rect.bottom() - size / 2,
+            max(1, rect.width() - size * 2),
+            size,
+        )
+    if edge == "l":
+        return QRectF(
+            rect.left() - size / 2,
+            rect.top() + size,
+            size,
+            max(1, rect.height() - size * 2),
+        )
+    return QRectF(
+        rect.right() - size / 2,
+        rect.top() + size,
+        size,
+        max(1, rect.height() - size * 2),
+    )

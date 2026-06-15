@@ -250,6 +250,7 @@ class MainWindow(QMainWindow):
         self.canvas = ImageCanvas()
         self.canvas.slice_selected.connect(self._select_slice)
         self.canvas.source_point_clicked.connect(self._pick_canvas_color)
+        self.canvas.slice_geometry_changed.connect(self._apply_canvas_slice_geometry)
         self.canvas.zoom_changed.connect(self._update_canvas_zoom_label)
 
         self.preview = PreviewWidget()
@@ -829,6 +830,29 @@ class MainWindow(QMainWindow):
             height=self.slice_h_spin.value(),
             area=selected.area,
         )
+        self._replace_selected_slice(clamp_slice(edited, self.current_image.size))
+
+    def _apply_canvas_slice_geometry(
+        self,
+        index: int,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> None:
+        if self.current_image is None or not 0 <= index < len(self.current_slices):
+            return
+
+        current = self.current_slices[index]
+        edited = SpriteSlice(
+            name=current.name,
+            x=x,
+            y=y,
+            width=width,
+            height=height,
+            area=current.area,
+        )
+        self.selected_slice_index = index
         self._replace_selected_slice(clamp_slice(edited, self.current_image.size))
 
     def _nudge_selected(self, direction_x: int, direction_y: int) -> None:
