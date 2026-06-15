@@ -206,6 +206,10 @@ class MainWindow(QMainWindow):
         self.bg_spill_spin.setRange(0, 100)
         self.bg_spill_spin.setValue(60)
 
+        self.bg_edge_contract_spin = QSpinBox()
+        self.bg_edge_contract_spin.setRange(0, 16)
+        self.bg_edge_contract_spin.setValue(0)
+
         self.slice_x_spin = QSpinBox()
         self.slice_y_spin = QSpinBox()
         self.slice_w_spin = QSpinBox()
@@ -347,6 +351,7 @@ class MainWindow(QMainWindow):
         background_layout.addRow("容差", self.bg_tolerance_spin)
         background_layout.addRow("羽化", self.bg_feather_spin)
         background_layout.addRow("去白边", self.bg_spill_spin)
+        background_layout.addRow("边缘收缩", self.bg_edge_contract_spin)
         background_layout.addRow(sample_button)
         background_layout.addRow(pick_button)
         background_layout.addRow(self.batch_remove_check)
@@ -751,6 +756,7 @@ class MainWindow(QMainWindow):
             tolerance=self.bg_tolerance_spin.value(),
             feather=self.bg_feather_spin.value(),
             spill_cleanup=self.bg_spill_spin.value(),
+            edge_contract=self.bg_edge_contract_spin.value(),
         )
 
     def _sample_top_left_color(self) -> None:

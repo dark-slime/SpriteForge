@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from typing import Literal
 
-from PIL import Image
+from PIL import Image, ImageFilter
 
 
 ColorSampleMode = Literal["corners", "top_left", "manual"]
@@ -21,6 +21,7 @@ class SolidColorRemoveOptions:
     tolerance: int = 28
     feather: int = 10
     spill_cleanup: int = 60
+    edge_contract: int = 0
 
 
 def sample_background_color(
@@ -79,9 +80,11 @@ def remove_solid_background(
     original_alpha = arr[:, :, 3]
 
     bg = np.asarray(background_color, dtype="float32")
-    distance = np.max(np.abs(rgb - bg), axis=2)
+    color_delta = np.abs(rgb - bg)
+    distance = np.max(color_delta, axis=2)
     tolerance = _clamp(options.tolerance, 0, 255)
     feather = _clamp(options.feather, 0, 255)
+    cleanup_strength = (_clamp(options.spill_cleanup, 0, 100) / 100.0) ** 0.5
 
     if feather <= 0:
         keep = (distance > tolerance).astype("float32")
@@ -89,16 +92,35 @@ def remove_solid_background(
         keep = np.clip((distance - tolerance) / feather, 0.0, 1.0)
         keep = keep * keep * (3.0 - 2.0 * keep)
 
-    new_alpha = np.clip(original_alpha * keep, 0.0, 255.0)
-    cleanup_strength = _clamp(options.spill_cleanup, 0, 100) / 100.0
+    channel_ranges = np.maximum(bg, 255.0 - bg)
+    channel_ranges = np.maximum(channel_ranges, 1.0)
+    matte_alpha = np.max(color_delta / channel_ranges, axis=2)
+    tolerance_fraction = tolerance / 255.0
+    matte_alpha = np.clip(
+        (matte_alpha - tolerance_fraction) / max(1.0 - tolerance_fraction, 1.0 / 255.0),
+        0.0,
+        1.0,
+    )
+
     if cleanup_strength > 0:
-        alpha_fraction = np.clip(new_alpha / 255.0, 1.0 / 255.0, 1.0)
+        defringed_keep = np.minimum(keep, matte_alpha)
+        keep = keep * (1.0 - cleanup_strength) + defringed_keep * cleanup_strength
+
+    new_alpha = np.clip(original_alpha * keep, 0.0, 255.0)
+    if cleanup_strength > 0:
+        alpha_fraction = np.clip(matte_alpha, 1.0 / 255.0, 1.0)
         unmatted_rgb = (rgb - bg * (1.0 - alpha_fraction[:, :, None])) / alpha_fraction[
             :, :, None
         ]
-        edge_strength = (1.0 - keep) * cleanup_strength
+        edge_strength = (1.0 - matte_alpha) * cleanup_strength
         edge_strength = edge_strength[:, :, None] * (new_alpha[:, :, None] > 0)
         rgb = rgb * (1.0 - edge_strength) + unmatted_rgb * edge_strength
+
+    edge_contract = _clamp(options.edge_contract, 0, 16)
+    if edge_contract > 0:
+        alpha_image = Image.fromarray(new_alpha.astype("uint8"), mode="L")
+        alpha_image = alpha_image.filter(ImageFilter.MinFilter(edge_contract * 2 + 1))
+        new_alpha = np.asarray(alpha_image).astype("float32")
 
     output = arr.copy()
     output[:, :, :3] = np.clip(rgb, 0.0, 255.0)

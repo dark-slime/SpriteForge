@@ -52,6 +52,47 @@ class SolidBackgroundRemoveTests(unittest.TestCase):
         self.assertLess(result.getpixel((1, 0))[3], 255)
         self.assertEqual(result.getpixel((2, 0))[3], 255)
 
+    def test_spill_cleanup_defringes_gray_antialias_pixels_on_white(self) -> None:
+        image = Image.new("RGBA", (3, 1), (255, 255, 255, 255))
+        image.putpixel((1, 0), (128, 128, 128, 255))
+        image.putpixel((2, 0), (0, 0, 0, 255))
+
+        result = remove_solid_background(
+            image,
+            SolidColorRemoveOptions(
+                background_color=(255, 255, 255),
+                sample_mode="manual",
+                tolerance=10,
+                feather=50,
+                spill_cleanup=10,
+            ),
+        )
+
+        edge_red, _edge_green, _edge_blue, edge_alpha = result.getpixel((1, 0))
+        self.assertLess(edge_red, 128)
+        self.assertLess(edge_alpha, 255)
+        self.assertEqual(result.getpixel((2, 0))[3], 255)
+
+    def test_edge_contract_erodes_alpha_edges(self) -> None:
+        image = Image.new("RGBA", (5, 5), (255, 255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((1, 1, 3, 3), fill=(0, 0, 0, 255))
+
+        result = remove_solid_background(
+            image,
+            SolidColorRemoveOptions(
+                background_color=(255, 255, 255),
+                sample_mode="manual",
+                tolerance=10,
+                feather=0,
+                spill_cleanup=0,
+                edge_contract=1,
+            ),
+        )
+
+        self.assertEqual(result.getpixel((1, 1))[3], 0)
+        self.assertEqual(result.getpixel((2, 2))[3], 255)
+
     def test_sample_background_color_uses_corner_median(self) -> None:
         image = Image.new("RGBA", (32, 32), (241, 242, 243, 255))
         image.putpixel((16, 16), (10, 20, 30, 255))
