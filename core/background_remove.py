@@ -103,8 +103,10 @@ def remove_solid_background(
     )
 
     if cleanup_strength > 0:
+        edge_band = _edge_band_mask(keep <= 0.01, radius=max(1, min(4, feather // 16 + 1)))
         defringed_keep = np.minimum(keep, matte_alpha)
-        keep = keep * (1.0 - cleanup_strength) + defringed_keep * cleanup_strength
+        edge_alpha_strength = edge_band * cleanup_strength
+        keep = keep * (1.0 - edge_alpha_strength) + defringed_keep * edge_alpha_strength
 
     new_alpha = np.clip(original_alpha * keep, 0.0, 255.0)
     if cleanup_strength > 0:
@@ -112,7 +114,7 @@ def remove_solid_background(
         unmatted_rgb = (rgb - bg * (1.0 - alpha_fraction[:, :, None])) / alpha_fraction[
             :, :, None
         ]
-        edge_strength = (1.0 - matte_alpha) * cleanup_strength
+        edge_strength = (1.0 - matte_alpha) * edge_band * cleanup_strength
         edge_strength = edge_strength[:, :, None] * (new_alpha[:, :, None] > 0)
         rgb = rgb * (1.0 - edge_strength) + unmatted_rgb * edge_strength
 
@@ -162,3 +164,12 @@ class BackgroundRemover:
 
 def _clamp(value: int, low: int, high: int) -> int:
     return max(low, min(high, int(value)))
+
+
+def _edge_band_mask(background_mask, radius: int):
+    import numpy as np
+
+    mask_image = Image.fromarray((background_mask.astype("uint8") * 255), mode="L")
+    dilated = mask_image.filter(ImageFilter.MaxFilter(radius * 2 + 1))
+    edge_band = np.asarray(dilated).astype("float32") / 255.0
+    return edge_band * (1.0 - background_mask.astype("float32"))

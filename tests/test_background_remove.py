@@ -73,6 +73,24 @@ class SolidBackgroundRemoveTests(unittest.TestCase):
         self.assertLess(edge_alpha, 255)
         self.assertEqual(result.getpixel((2, 0))[3], 255)
 
+    def test_spill_cleanup_does_not_fade_foreground_interior(self) -> None:
+        image = Image.new("RGBA", (32, 32), (0, 0, 0, 255))
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((8, 8, 23, 23), fill=(200, 40, 40, 255))
+
+        result = remove_solid_background(
+            image,
+            SolidColorRemoveOptions(
+                background_color=(0, 0, 0),
+                sample_mode="manual",
+                tolerance=10,
+                feather=50,
+                spill_cleanup=80,
+            ),
+        )
+
+        self.assertEqual(result.getpixel((16, 16)), (200, 40, 40, 255))
+
     def test_edge_contract_erodes_alpha_edges(self) -> None:
         image = Image.new("RGBA", (5, 5), (255, 255, 255, 255))
         draw = ImageDraw.Draw(image)
