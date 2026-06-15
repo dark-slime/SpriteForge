@@ -4,7 +4,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from core.background_remove import (
-    BackgroundRemover,
     SolidColorRemoveOptions,
     remove_solid_background,
 )
@@ -27,12 +26,10 @@ def process_batch(
     output_root: str | Path,
     options: SliceOptions,
     remove_background: bool = False,
-    background_mode: str = "solid",
     solid_options: SolidColorRemoveOptions | None = None,
 ) -> list[BatchItemResult]:
     output_root_path = Path(output_root)
     image_paths = normalize_image_paths(sources)
-    remover = BackgroundRemover() if remove_background and background_mode == "ai" else None
     solid_options = solid_options or SolidColorRemoveOptions()
     results: list[BatchItemResult] = []
 
@@ -40,9 +37,7 @@ def process_batch(
         item_output = output_root_path / image_path.stem
         try:
             image = load_image(image_path)
-            if remover is not None:
-                image = remover.remove(image)
-            elif remove_background:
+            if remove_background:
                 image = remove_solid_background(image, solid_options)
 
             slices = slice_image(image, options=options, base_name=image_path.stem)

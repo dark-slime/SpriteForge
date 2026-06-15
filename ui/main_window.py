@@ -34,7 +34,6 @@ from PySide6.QtWidgets import (
 
 from core.background_remove import (
     BackgroundRemoveUnavailable,
-    BackgroundRemover,
     SolidColorRemoveOptions,
     remove_solid_background,
     sample_background_color,
@@ -63,11 +62,11 @@ class MainWindow(QMainWindow):
 
         self.image_paths: list[Path] = []
         self.current_path: Path | None = None
+        self.original_image: Image.Image | None = None
         self.current_image: Image.Image | None = None
         self.current_slices: list[SpriteSlice] = []
         self.selected_slice_index: int | None = None
         self._updating_slice_editor = False
-        self.background_remover = BackgroundRemover()
 
         self._create_actions()
         self._create_menu()
@@ -103,6 +102,12 @@ class MainWindow(QMainWindow):
         self.remove_background_action = QAction("去背景", self)
         self.remove_background_action.triggered.connect(self._remove_background)
 
+        self.rerun_background_action = QAction("从原图重做去背景", self)
+        self.rerun_background_action.triggered.connect(self._rerun_background_from_original)
+
+        self.reset_image_action = QAction("重置为原图", self)
+        self.reset_image_action.triggered.connect(self._reset_current_image)
+
         self.delete_slice_action = QAction("删除选区", self)
         self.delete_slice_action.setShortcut(QKeySequence.StandardKey.Delete)
         self.delete_slice_action.setEnabled(False)
@@ -135,6 +140,8 @@ class MainWindow(QMainWindow):
 
         process_menu = self.menuBar().addMenu("处理")
         process_menu.addAction(self.remove_background_action)
+        process_menu.addAction(self.rerun_background_action)
+        process_menu.addAction(self.reset_image_action)
         process_menu.addAction(self.slice_action)
         process_menu.addAction(self.delete_slice_action)
         process_menu.addAction(self.batch_action)
@@ -146,6 +153,8 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self.import_folder_action)
         toolbar.addSeparator()
         toolbar.addAction(self.remove_background_action)
+        toolbar.addAction(self.rerun_background_action)
+        toolbar.addAction(self.reset_image_action)
         toolbar.addAction(self.slice_action)
         toolbar.addAction(self.delete_slice_action)
         toolbar.addSeparator()
@@ -177,10 +186,6 @@ class MainWindow(QMainWindow):
         self.padding_spin = QSpinBox()
         self.padding_spin.setRange(0, 512)
         self.padding_spin.setValue(4)
-
-        self.bg_mode_combo = QComboBox()
-        self.bg_mode_combo.addItem("纯色快速", "solid")
-        self.bg_mode_combo.addItem("AI rembg", "ai")
 
         self.bg_sample_combo = QComboBox()
         self.bg_sample_combo.addItem("四角自动", "corners")
@@ -304,6 +309,12 @@ class MainWindow(QMainWindow):
         remove_button = QPushButton("去背景")
         remove_button.clicked.connect(self._remove_background)
 
+        rerun_bg_button = QPushButton("从原图重做去背景")
+        rerun_bg_button.clicked.connect(self._rerun_background_from_original)
+
+        reset_image_button = QPushButton("重置为原图")
+        reset_image_button.clicked.connect(self._reset_current_image)
+
         slice_button = QPushButton("自动切图")
         slice_button.clicked.connect(self._slice_current_image)
 
@@ -324,6 +335,8 @@ class MainWindow(QMainWindow):
         process_group = QGroupBox("操作")
         process_layout = QVBoxLayout(process_group)
         process_layout.addWidget(remove_button)
+        process_layout.addWidget(rerun_bg_button)
+        process_layout.addWidget(reset_image_button)
         process_layout.addWidget(slice_button)
         process_layout.addWidget(export_button)
         process_layout.addWidget(batch_button)
@@ -346,7 +359,6 @@ class MainWindow(QMainWindow):
 
         background_group = QGroupBox("去背景参数")
         background_layout = QFormLayout(background_group)
-        background_layout.addRow("模式", self.bg_mode_combo)
         background_layout.addRow("背景采样", self.bg_sample_combo)
         background_layout.addRow("手动颜色", color_widget)
         background_layout.addRow("容差", self.bg_tolerance_spin)
@@ -524,6 +536,7 @@ class MainWindow(QMainWindow):
 
     def _clear_current_image(self) -> None:
         self.current_path = None
+        self.original_image = None
         self.current_image = None
         self.current_slices = []
         self.selected_slice_index = None
@@ -596,6 +609,7 @@ class MainWindow(QMainWindow):
             return
 
         self.current_path = path
+        self.original_image = image.copy()
         self.current_image = image
         self.current_slices = []
         self.selected_slice_index = None
@@ -610,16 +624,23 @@ class MainWindow(QMainWindow):
             self._show_warning("请先导入图片")
             return
 
+        self._apply_background_removal(self.current_image)
+
+    def _rerun_background_from_original(self) -> None:
+        if self.original_image is None:
+            self._show_warning("请先导入图片")
+            return
+
+        self._apply_background_removal(self.original_image.copy())
+
+    def _apply_background_removal(self, source_image: Image.Image) -> None:
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         self.statusBar().showMessage("正在去背景...")
         try:
-            if self.bg_mode_combo.currentData() == "ai":
-                self.current_image = self.background_remover.remove(self.current_image)
-            else:
-                self.current_image = remove_solid_background(
-                    self.current_image,
-                    self._solid_background_options(),
-                )
+            self.current_image = remove_solid_background(
+                source_image,
+                self._solid_background_options(),
+            )
         except BackgroundRemoveUnavailable as exc:
             self._show_error("去背景不可用", str(exc))
             return
@@ -636,6 +657,20 @@ class MainWindow(QMainWindow):
         self.preview.set_slices(self.current_image, [])
         self._sync_slice_editor()
         self.statusBar().showMessage("去背景完成", 5000)
+
+    def _reset_current_image(self) -> None:
+        if self.original_image is None:
+            self._show_warning("请先导入图片")
+            return
+
+        self.current_image = self.original_image.copy()
+        self.current_slices = []
+        self.selected_slice_index = None
+        self.canvas.set_image(self.current_image)
+        self.canvas.set_slices([])
+        self.preview.set_slices(self.current_image, [])
+        self._sync_slice_editor()
+        self.statusBar().showMessage("已重置为原图", 5000)
 
     def _slice_current_image(self) -> None:
         if self.current_image is None:
@@ -715,7 +750,6 @@ class MainWindow(QMainWindow):
                 output_dir,
                 self._slice_options(),
                 remove_background=self.batch_remove_check.isChecked(),
-                background_mode=self.bg_mode_combo.currentData(),
                 solid_options=self._solid_background_options(),
             )
         finally:
