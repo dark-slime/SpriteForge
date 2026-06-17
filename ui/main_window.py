@@ -258,6 +258,9 @@ class MainWindow(QMainWindow):
         self.preview_layout_combo = QComboBox()
         self.preview_layout_combo.addItem("横向滚动", "horizontal")
         self.preview_layout_combo.addItem("自动换行", "wrap")
+        self.preview_layout_combo.setCurrentIndex(
+            self.preview_layout_combo.findData("wrap")
+        )
 
         left_panel = self._build_left_panel()
 
