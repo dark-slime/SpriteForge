@@ -1,3 +1,7 @@
+# 声明
+
+本项目纯ai写的，有需要可以自行修改
+
 # SpriteForge
 
 SpriteForge 是一个用于处理游戏美术资源的 Windows 桌面工具。当前 MVP 聚焦透明 PNG 工作流：导入图片、预览图片、基于 Alpha 通道识别切图边界、导出切分后的 PNG 文件，并生成 JSON 元数据。
