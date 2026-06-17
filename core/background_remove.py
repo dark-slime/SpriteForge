@@ -7,6 +7,7 @@ from PIL import Image, ImageFilter
 
 
 ColorSampleMode = Literal["corners", "top_left", "manual"]
+RemoveScopeMode = Literal["edge_connected", "global", "seed"]
 
 
 class BackgroundRemoveUnavailable(RuntimeError):
@@ -17,6 +18,8 @@ class BackgroundRemoveUnavailable(RuntimeError):
 class SolidColorRemoveOptions:
     background_color: tuple[int, int, int] | None = None
     sample_mode: ColorSampleMode = "corners"
+    remove_scope: RemoveScopeMode = "edge_connected"
+    seed_points: tuple[tuple[int, int], ...] = ()
     tolerance: int = 28
     feather: int = 10
     spill_cleanup: int = 60
@@ -91,6 +94,16 @@ def remove_solid_background(
         keep = np.clip((distance - tolerance) / feather, 0.0, 1.0)
         keep = keep * keep * (3.0 - 2.0 * keep)
 
+    hard_background = distance <= tolerance
+    selected_background_mask = _selected_background_mask(
+        hard_background,
+        options.remove_scope,
+        options.seed_points,
+    )
+    if options.remove_scope != "global":
+        scope_mask = _soft_scope_mask(selected_background_mask, feather)
+        keep = np.where(scope_mask, keep, 1.0)
+
     channel_ranges = np.maximum(bg, 255.0 - bg)
     channel_ranges = np.maximum(channel_ranges, 1.0)
     matte_alpha = np.max(color_delta / channel_ranges, axis=2)
@@ -101,8 +114,12 @@ def remove_solid_background(
         1.0,
     )
 
+    edge_band = np.zeros_like(keep, dtype="float32")
     if cleanup_strength > 0:
-        edge_band = _edge_band_mask(keep <= 0.01, radius=max(1, min(4, feather // 16 + 1)))
+        edge_band = _edge_band_mask(
+            selected_background_mask,
+            radius=max(1, min(4, feather // 16 + 1)),
+        )
         defringed_keep = np.minimum(keep, matte_alpha)
         edge_alpha_strength = edge_band * cleanup_strength
         keep = keep * (1.0 - edge_alpha_strength) + defringed_keep * edge_alpha_strength
@@ -128,8 +145,66 @@ def remove_solid_background(
     output[:, :, 3] = new_alpha
     return Image.fromarray(output.astype("uint8"), mode="RGBA")
 
+
 def _clamp(value: int, low: int, high: int) -> int:
     return max(low, min(high, int(value)))
+
+
+def _selected_background_mask(
+    hard_background,
+    remove_scope: RemoveScopeMode,
+    seed_points: tuple[tuple[int, int], ...],
+):
+    import numpy as np
+
+    if remove_scope == "global":
+        return hard_background
+    if not hard_background.any():
+        return np.zeros_like(hard_background, dtype=bool)
+
+    try:
+        import cv2
+    except ImportError as exc:
+        raise BackgroundRemoveUnavailable(
+            "OpenCV is required for connected background removal. "
+            "Install dependencies with: pip install -r requirements.txt"
+        ) from exc
+
+    _label_count, labels = cv2.connectedComponents(
+        hard_background.astype("uint8"),
+        connectivity=8,
+    )
+    selected_labels: set[int] = set()
+    height, width = hard_background.shape
+
+    if remove_scope == "edge_connected":
+        border_labels = np.concatenate(
+            [
+                labels[0, :],
+                labels[height - 1, :],
+                labels[:, 0],
+                labels[:, width - 1],
+            ]
+        )
+        selected_labels = {int(label) for label in border_labels if label != 0}
+    elif remove_scope == "seed":
+        for x, y in seed_points:
+            if 0 <= x < width and 0 <= y < height:
+                label = int(labels[y, x])
+                if label != 0:
+                    selected_labels.add(label)
+
+    if not selected_labels:
+        return np.zeros_like(hard_background, dtype=bool)
+    return np.isin(labels, list(selected_labels))
+
+
+def _soft_scope_mask(selected_background_mask, feather: int):
+    if feather <= 0:
+        return selected_background_mask
+
+    radius = max(1, min(8, feather // 8 + 1))
+    return selected_background_mask | (_edge_band_mask(selected_background_mask, radius) > 0)
 
 
 def _edge_band_mask(background_mask, radius: int):

@@ -66,6 +66,8 @@ class MainWindow(QMainWindow):
         self.current_image: Image.Image | None = None
         self.current_slices: list[SpriteSlice] = []
         self.selected_slice_index: int | None = None
+        self.background_seed_points: list[tuple[int, int]] = []
+        self._canvas_pick_mode: str | None = None
         self._updating_slice_editor = False
 
         self._create_actions()
@@ -192,6 +194,11 @@ class MainWindow(QMainWindow):
         self.bg_sample_combo.addItem("左上角", "top_left")
         self.bg_sample_combo.addItem("手动 RGB", "manual")
 
+        self.bg_scope_combo = QComboBox()
+        self.bg_scope_combo.addItem("边缘连通背景", "edge_connected")
+        self.bg_scope_combo.addItem("全图匹配颜色", "global")
+        self.bg_scope_combo.addItem("点击区域", "seed")
+
         self.bg_r_spin = QSpinBox()
         self.bg_g_spin = QSpinBox()
         self.bg_b_spin = QSpinBox()
@@ -234,6 +241,7 @@ class MainWindow(QMainWindow):
 
         self.merge_check = QCheckBox("合并邻近区域")
         self.batch_remove_check = QCheckBox("批量时去背景")
+        self.bg_seed_count_label = QLabel("0 个区域")
 
         self.naming_combo = QComboBox()
         self.naming_combo.addItem("sprite_001", "sprite")
@@ -254,7 +262,7 @@ class MainWindow(QMainWindow):
 
         self.canvas = ImageCanvas()
         self.canvas.slice_selected.connect(self._select_slice)
-        self.canvas.source_point_clicked.connect(self._pick_canvas_color)
+        self.canvas.source_point_clicked.connect(self._handle_canvas_point_clicked)
         self.canvas.slice_geometry_changed.connect(self._apply_canvas_slice_geometry)
         self.canvas.zoom_changed.connect(self._update_canvas_zoom_label)
 
@@ -357,9 +365,23 @@ class MainWindow(QMainWindow):
         pick_button = QPushButton("从画布吸色")
         pick_button.clicked.connect(self._start_canvas_color_pick)
 
+        seed_button = QPushButton("添加点击区域")
+        seed_button.clicked.connect(self._start_background_seed_pick)
+
+        clear_seed_button = QPushButton("清空点击区域")
+        clear_seed_button.clicked.connect(self._clear_background_seed_points)
+
+        seed_widget = QWidget()
+        seed_layout = QHBoxLayout(seed_widget)
+        seed_layout.setContentsMargins(0, 0, 0, 0)
+        seed_layout.addWidget(seed_button)
+        seed_layout.addWidget(clear_seed_button)
+        seed_layout.addWidget(self.bg_seed_count_label)
+
         background_group = QGroupBox("去背景参数")
         background_layout = QFormLayout(background_group)
         background_layout.addRow("背景采样", self.bg_sample_combo)
+        background_layout.addRow("去背景范围", self.bg_scope_combo)
         background_layout.addRow("手动颜色", color_widget)
         background_layout.addRow("容差", self.bg_tolerance_spin)
         background_layout.addRow("羽化", self.bg_feather_spin)
@@ -367,6 +389,7 @@ class MainWindow(QMainWindow):
         background_layout.addRow("边缘收缩", self.bg_edge_contract_spin)
         background_layout.addRow(sample_button)
         background_layout.addRow(pick_button)
+        background_layout.addRow("点击区域", seed_widget)
         background_layout.addRow(self.batch_remove_check)
 
         params_group = QGroupBox("切图参数")
@@ -540,9 +563,13 @@ class MainWindow(QMainWindow):
         self.current_image = None
         self.current_slices = []
         self.selected_slice_index = None
+        self.background_seed_points = []
+        self._canvas_pick_mode = None
         self.canvas.set_image(None)
         self.canvas.set_slices([])
+        self.canvas.set_pick_point_mode(False)
         self.preview.set_slices(None, [])
+        self._refresh_seed_count()
         self._sync_slice_editor()
 
     def _add_image_paths(self, raw_paths: list[Path]) -> None:
@@ -613,9 +640,13 @@ class MainWindow(QMainWindow):
         self.current_image = image
         self.current_slices = []
         self.selected_slice_index = None
+        self.background_seed_points = []
+        self._canvas_pick_mode = None
         self.canvas.set_image(image)
         self.canvas.set_slices([])
+        self.canvas.set_pick_point_mode(False)
         self.preview.set_slices(image, [])
+        self._refresh_seed_count()
         self._sync_slice_editor()
         self.statusBar().showMessage(f"Loaded {path.name}")
 
@@ -788,6 +819,8 @@ class MainWindow(QMainWindow):
                 self.bg_b_spin.value(),
             ),
             sample_mode=self.bg_sample_combo.currentData(),
+            remove_scope=self.bg_scope_combo.currentData(),
+            seed_points=tuple(self.background_seed_points),
             tolerance=self.bg_tolerance_spin.value(),
             feather=self.bg_feather_spin.value(),
             spill_cleanup=self.bg_spill_spin.value(),
@@ -816,8 +849,25 @@ class MainWindow(QMainWindow):
             self._show_warning("请先导入图片")
             return
 
+        self._canvas_pick_mode = "color"
         self.canvas.set_pick_point_mode(True)
         self.statusBar().showMessage("请在预览图上点击背景颜色", 6000)
+
+    def _start_background_seed_pick(self) -> None:
+        if self.current_image is None:
+            self._show_warning("请先导入图片")
+            return
+
+        self._canvas_pick_mode = "seed"
+        self.canvas.set_pick_point_mode(True)
+        self.statusBar().showMessage("请在预览图上点击要删除的同色区域", 6000)
+
+    def _handle_canvas_point_clicked(self, x: int, y: int) -> None:
+        if self._canvas_pick_mode == "seed":
+            self._add_background_seed_point(x, y)
+            return
+
+        self._pick_canvas_color(x, y)
 
     def _pick_canvas_color(self, x: int, y: int) -> None:
         if self.current_image is None:
@@ -830,11 +880,41 @@ class MainWindow(QMainWindow):
         manual_index = self.bg_sample_combo.findData("manual")
         if manual_index >= 0:
             self.bg_sample_combo.setCurrentIndex(manual_index)
+        self._canvas_pick_mode = None
         self.canvas.set_pick_point_mode(False)
         self.statusBar().showMessage(
             f"已从画布取色 RGB({red}, {green}, {blue})",
             5000,
         )
+
+    def _add_background_seed_point(self, x: int, y: int) -> None:
+        if self.current_image is None:
+            return
+
+        point = (x, y)
+        if point not in self.background_seed_points:
+            self.background_seed_points.append(point)
+        seed_index = self.bg_scope_combo.findData("seed")
+        if seed_index >= 0:
+            self.bg_scope_combo.setCurrentIndex(seed_index)
+        self._canvas_pick_mode = None
+        self.canvas.set_pick_point_mode(False)
+        self._refresh_seed_count()
+        self.statusBar().showMessage(f"已添加点击区域 ({x}, {y})", 5000)
+
+    def _clear_background_seed_points(self) -> None:
+        if not self.background_seed_points:
+            return
+
+        self.background_seed_points = []
+        self._refresh_seed_count()
+        self.statusBar().showMessage("已清空点击区域", 4000)
+
+    def _refresh_seed_count(self) -> None:
+        if hasattr(self, "bg_seed_count_label"):
+            self.bg_seed_count_label.setText(
+                f"{len(self.background_seed_points)} 个区域"
+            )
 
     def _select_slice(self, index: int) -> None:
         self.selected_slice_index = index

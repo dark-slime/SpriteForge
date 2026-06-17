@@ -91,6 +91,62 @@ class SolidBackgroundRemoveTests(unittest.TestCase):
 
         self.assertEqual(result.getpixel((16, 16)), (200, 40, 40, 255))
 
+    def test_edge_connected_scope_preserves_internal_matching_color(self) -> None:
+        image = _image_with_internal_black_pixel()
+
+        result = remove_solid_background(
+            image,
+            SolidColorRemoveOptions(
+                background_color=(0, 0, 0),
+                sample_mode="manual",
+                tolerance=0,
+                feather=0,
+                spill_cleanup=0,
+            ),
+        )
+
+        self.assertEqual(result.getpixel((0, 0))[3], 0)
+        self.assertEqual(result.getpixel((3, 3)), (0, 0, 0, 255))
+        self.assertEqual(result.getpixel((2, 2)), (220, 20, 20, 255))
+
+    def test_global_scope_removes_internal_matching_color(self) -> None:
+        image = _image_with_internal_black_pixel()
+
+        result = remove_solid_background(
+            image,
+            SolidColorRemoveOptions(
+                background_color=(0, 0, 0),
+                sample_mode="manual",
+                remove_scope="global",
+                tolerance=0,
+                feather=0,
+                spill_cleanup=0,
+            ),
+        )
+
+        self.assertEqual(result.getpixel((0, 0))[3], 0)
+        self.assertEqual(result.getpixel((3, 3))[3], 0)
+
+    def test_seed_scope_removes_only_clicked_connected_region(self) -> None:
+        image = _image_with_internal_black_pixel()
+
+        result = remove_solid_background(
+            image,
+            SolidColorRemoveOptions(
+                background_color=(0, 0, 0),
+                sample_mode="manual",
+                remove_scope="seed",
+                seed_points=((3, 3),),
+                tolerance=0,
+                feather=0,
+                spill_cleanup=0,
+            ),
+        )
+
+        self.assertEqual(result.getpixel((0, 0))[3], 255)
+        self.assertEqual(result.getpixel((3, 3))[3], 0)
+        self.assertEqual(result.getpixel((2, 2)), (220, 20, 20, 255))
+
     def test_edge_contract_erodes_alpha_edges(self) -> None:
         image = Image.new("RGBA", (5, 5), (255, 255, 255, 255))
         draw = ImageDraw.Draw(image)
@@ -117,6 +173,14 @@ class SolidBackgroundRemoveTests(unittest.TestCase):
 
         self.assertEqual(sample_background_color(image, "corners"), (241, 242, 243))
         self.assertEqual(sample_background_color(image, "top_left"), (241, 242, 243))
+
+
+def _image_with_internal_black_pixel() -> Image.Image:
+    image = Image.new("RGBA", (7, 7), (0, 0, 0, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((1, 1, 5, 5), fill=(220, 20, 20, 255))
+    image.putpixel((3, 3), (0, 0, 0, 255))
+    return image
 
 
 if __name__ == "__main__":
