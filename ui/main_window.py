@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 from core.background_remove import (
     BackgroundRemoveUnavailable,
     SolidColorRemoveOptions,
+    preview_background_selection_mask,
     remove_solid_background,
     sample_background_color,
 )
@@ -265,6 +266,20 @@ class MainWindow(QMainWindow):
         self.canvas.source_point_clicked.connect(self._handle_canvas_point_clicked)
         self.canvas.slice_geometry_changed.connect(self._apply_canvas_slice_geometry)
         self.canvas.zoom_changed.connect(self._update_canvas_zoom_label)
+        self.bg_sample_combo.currentIndexChanged.connect(
+            self._refresh_background_selection_preview
+        )
+        self.bg_scope_combo.currentIndexChanged.connect(
+            self._refresh_background_selection_preview
+        )
+        for spin in (
+            self.bg_r_spin,
+            self.bg_g_spin,
+            self.bg_b_spin,
+            self.bg_tolerance_spin,
+            self.bg_feather_spin,
+        ):
+            spin.valueChanged.connect(self._refresh_background_selection_preview)
 
         self.preview = PreviewWidget()
         self.preview.slice_selected.connect(self._select_slice)
@@ -568,6 +583,8 @@ class MainWindow(QMainWindow):
         self.canvas.set_image(None)
         self.canvas.set_slices([])
         self.canvas.set_pick_point_mode(False)
+        self.canvas.set_background_seed_points([])
+        self.canvas.set_background_selection_mask(None)
         self.preview.set_slices(None, [])
         self._refresh_seed_count()
         self._sync_slice_editor()
@@ -647,6 +664,7 @@ class MainWindow(QMainWindow):
         self.canvas.set_pick_point_mode(False)
         self.preview.set_slices(image, [])
         self._refresh_seed_count()
+        self._refresh_background_selection_preview()
         self._sync_slice_editor()
         self.statusBar().showMessage(f"Loaded {path.name}")
 
@@ -686,6 +704,7 @@ class MainWindow(QMainWindow):
         self.canvas.set_image(self.current_image)
         self.canvas.set_slices([])
         self.preview.set_slices(self.current_image, [])
+        self._refresh_background_selection_preview()
         self._sync_slice_editor()
         self.statusBar().showMessage("去背景完成", 5000)
 
@@ -700,6 +719,7 @@ class MainWindow(QMainWindow):
         self.canvas.set_image(self.current_image)
         self.canvas.set_slices([])
         self.preview.set_slices(self.current_image, [])
+        self._refresh_background_selection_preview()
         self._sync_slice_editor()
         self.statusBar().showMessage("已重置为原图", 5000)
 
@@ -900,6 +920,7 @@ class MainWindow(QMainWindow):
         self._canvas_pick_mode = None
         self.canvas.set_pick_point_mode(False)
         self._refresh_seed_count()
+        self._refresh_background_selection_preview()
         self.statusBar().showMessage(f"已添加点击区域 ({x}, {y})", 5000)
 
     def _clear_background_seed_points(self) -> None:
@@ -908,6 +929,7 @@ class MainWindow(QMainWindow):
 
         self.background_seed_points = []
         self._refresh_seed_count()
+        self._refresh_background_selection_preview()
         self.statusBar().showMessage("已清空点击区域", 4000)
 
     def _refresh_seed_count(self) -> None:
@@ -915,6 +937,33 @@ class MainWindow(QMainWindow):
             self.bg_seed_count_label.setText(
                 f"{len(self.background_seed_points)} 个区域"
             )
+
+    def _refresh_background_selection_preview(self, *_args) -> None:
+        if not hasattr(self, "canvas"):
+            return
+
+        show_seed_preview = self.bg_scope_combo.currentData() == "seed"
+        seed_points = self.background_seed_points if show_seed_preview else []
+        self.canvas.set_background_seed_points(seed_points)
+
+        if (
+            self.current_image is None
+            or not show_seed_preview
+            or not self.background_seed_points
+        ):
+            self.canvas.set_background_selection_mask(None)
+            return
+
+        try:
+            mask = preview_background_selection_mask(
+                self.current_image,
+                self._solid_background_options(),
+            )
+        except Exception:
+            self.canvas.set_background_selection_mask(None)
+            return
+
+        self.canvas.set_background_selection_mask(mask)
 
     def _select_slice(self, index: int) -> None:
         self.selected_slice_index = index

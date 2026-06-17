@@ -58,6 +58,45 @@ def sample_background_color(
     return tuple(int(channel) for channel in color)
 
 
+def preview_background_selection_mask(
+    image: Image.Image,
+    options: SolidColorRemoveOptions | None = None,
+) -> Image.Image:
+    options = options or SolidColorRemoveOptions()
+    rgba_image = image.convert("RGBA")
+
+    try:
+        import numpy as np
+    except ImportError as exc:
+        raise BackgroundRemoveUnavailable(
+            "NumPy is required for solid color background removal. "
+            "Install dependencies with: pip install -r requirements.txt"
+        ) from exc
+
+    background_color = options.background_color
+    if background_color is None or options.sample_mode != "manual":
+        background_color = sample_background_color(rgba_image, options.sample_mode)
+
+    arr = np.asarray(rgba_image).astype("float32")
+    rgb = arr[:, :, :3]
+    bg = np.asarray(background_color, dtype="float32")
+    distance = np.max(np.abs(rgb - bg), axis=2)
+    hard_background = distance <= _clamp(options.tolerance, 0, 255)
+
+    selected_mask = _selected_background_mask(
+        hard_background,
+        options.remove_scope,
+        options.seed_points,
+    )
+    if options.remove_scope != "global":
+        selected_mask = _soft_scope_mask(
+            selected_mask,
+            _clamp(options.feather, 0, 255),
+        )
+
+    return Image.fromarray((selected_mask.astype("uint8") * 255), mode="L")
+
+
 def remove_solid_background(
     image: Image.Image,
     options: SolidColorRemoveOptions | None = None,

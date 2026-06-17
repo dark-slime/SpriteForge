@@ -6,6 +6,7 @@ from PIL import Image, ImageDraw
 
 from core.background_remove import (
     SolidColorRemoveOptions,
+    preview_background_selection_mask,
     remove_solid_background,
     sample_background_color,
 )
@@ -146,6 +147,26 @@ class SolidBackgroundRemoveTests(unittest.TestCase):
         self.assertEqual(result.getpixel((0, 0))[3], 255)
         self.assertEqual(result.getpixel((3, 3))[3], 0)
         self.assertEqual(result.getpixel((2, 2)), (220, 20, 20, 255))
+
+    def test_preview_mask_matches_seed_scope_selection(self) -> None:
+        image = _image_with_internal_black_pixel()
+
+        mask = preview_background_selection_mask(
+            image,
+            SolidColorRemoveOptions(
+                background_color=(0, 0, 0),
+                sample_mode="manual",
+                remove_scope="seed",
+                seed_points=((3, 3),),
+                tolerance=0,
+                feather=0,
+                spill_cleanup=0,
+            ),
+        )
+
+        self.assertEqual(mask.getpixel((0, 0)), 0)
+        self.assertEqual(mask.getpixel((3, 3)), 255)
+        self.assertEqual(mask.getpixel((2, 2)), 0)
 
     def test_edge_contract_erodes_alpha_edges(self) -> None:
         image = Image.new("RGBA", (5, 5), (255, 255, 255, 255))

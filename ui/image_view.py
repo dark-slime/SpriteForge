@@ -34,6 +34,8 @@ class ImageCanvas(QWidget):
         self.setMouseTracking(True)
         self._image: QImage | None = None
         self._source_size: tuple[int, int] | None = None
+        self._background_selection_overlay: QImage | None = None
+        self._background_seed_points: list[tuple[int, int]] = []
         self._slices: list[SpriteSlice] = []
         self._selected_index: int | None = None
         self._pick_point_mode = False
@@ -51,6 +53,8 @@ class ImageCanvas(QWidget):
         if image is None:
             self._image = None
             self._source_size = None
+            self._background_selection_overlay = None
+            self._background_seed_points = []
             self._slices = []
             self._selected_index = None
         else:
@@ -58,6 +62,22 @@ class ImageCanvas(QWidget):
             self._source_size = image.size
             self._selected_index = None
         self.fit_to_view()
+        self.update()
+
+    def set_background_selection_mask(self, mask: Image.Image | None) -> None:
+        if mask is None:
+            self._background_selection_overlay = None
+            self.update()
+            return
+
+        alpha = mask.convert("L").point(lambda value: 82 if value else 0)
+        overlay = Image.new("RGBA", mask.size, (88, 214, 141, 0))
+        overlay.putalpha(alpha)
+        self._background_selection_overlay = pil_image_to_qimage(overlay)
+        self.update()
+
+    def set_background_seed_points(self, points: list[tuple[int, int]]) -> None:
+        self._background_seed_points = list(points)
         self.update()
 
     def set_slices(self, slices: list[SpriteSlice]) -> None:
@@ -124,6 +144,8 @@ class ImageCanvas(QWidget):
         image_rect = self._image_rect()
         self._draw_checkerboard(painter, image_rect)
         painter.drawImage(image_rect, self._image)
+        self._draw_background_selection(painter, image_rect)
+        self._draw_background_seed_points(painter, image_rect)
         self._draw_slices(painter, image_rect)
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
@@ -468,6 +490,40 @@ class ImageCanvas(QWidget):
             painter.fillRect(label_rect, QColor(20, 24, 30, 210))
             painter.setPen(color)
             painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, label)
+
+    def _draw_background_selection(self, painter: QPainter, image_rect: QRect) -> None:
+        if self._background_selection_overlay is None:
+            return
+
+        painter.save()
+        painter.drawImage(image_rect, self._background_selection_overlay)
+        painter.restore()
+
+    def _draw_background_seed_points(self, painter: QPainter, image_rect: QRect) -> None:
+        if self._source_size is None or not self._background_seed_points:
+            return
+
+        source_width, source_height = self._source_size
+        scale_x = image_rect.width() / source_width
+        scale_y = image_rect.height() / source_height
+
+        painter.save()
+        point_color = QColor("#58d68d")
+        painter.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        for index, (source_x, source_y) in enumerate(self._background_seed_points, start=1):
+            view_x = image_rect.left() + source_x * scale_x
+            view_y = image_rect.top() + source_y * scale_y
+            marker_rect = QRectF(view_x - 7, view_y - 7, 14, 14)
+            painter.setPen(QPen(QColor("#123526"), 2))
+            painter.setBrush(point_color)
+            painter.drawEllipse(marker_rect)
+
+            label = str(index)
+            label_rect = QRectF(view_x + 8, view_y - 16, 22, 18)
+            painter.fillRect(label_rect, QColor(20, 24, 30, 220))
+            painter.setPen(point_color)
+            painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, label)
+        painter.restore()
 
     def _draw_handles(self, painter: QPainter, rect: QRectF, color: QColor) -> None:
         handle_size = 7
